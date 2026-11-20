@@ -27,7 +27,7 @@
 
 #include "vec.h"
 
-/* XXX: AF_BRIDGE doesn't seem to be defined on some systems, e.g., OSX. */
+/* XXX: AF_BRIDGE doesn't seem to be defined on some systems. */
 #ifndef AF_BRIDGE
 #define AF_BRIDGE AF_UNSPEC
 #endif
