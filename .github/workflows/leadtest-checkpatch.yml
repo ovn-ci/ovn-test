@@ -49,6 +49,7 @@ jobs:
           git init -q patch
           git -C patch fetch -q --depth=2 "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" "$SHA"
           git -C patch format-patch -1 --stdout FETCH_HEAD > patch.mbox
+          git -C patch log -1 --pretty=%s FETCH_HEAD > patch-subject.txt
 
       - name: Get checkpatch.py
         run: |
@@ -67,6 +68,12 @@ jobs:
           status=0
           python3 checkpatch.py patch.mbox > checkpatch.log 2>&1 || status=$?
           cat checkpatch.log
+          {
+            printf '````\n'
+            printf '== Checkpatch ==\n\n'
+            printf '== Patch: "%s" ==\n' "$(cat patch-subject.txt)"
+            printf '````'
+          } >> "$GITHUB_STEP_SUMMARY"
           if [ "$status" -ne 0 ] && ! grep -q '^ERROR' checkpatch.log &&
              grep -q '^WARNING' checkpatch.log; then
             python3 - checkpatch.log <<'EOF'
