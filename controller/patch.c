@@ -58,21 +58,48 @@ patch_port_name(const char *src, const char *dst)
     return xasprintf("patch-%s-to-%s", src, dst);
 }
 
-/* Return true if 'port' is a patch port with the specified 'peer'. */
-static bool
-match_patch_port(const struct ovsrec_port *port, const char *peer)
+/* Returns a map from the "peer" option of every patch interface in 'br' to
+ * the port that contains it.  The map is built the first time it is requested
+ * for 'br' and cached in 'peers_by_bridge', so that looking up a patch port
+ * does not need to walk all the ports of the bridge.  If more than one port
+ * has the same peer, the first one in 'br->ports' is kept. */
+static struct shash *
+get_patch_peers(struct shash *peers_by_bridge, const struct ovsrec_bridge *br)
 {
-    for (size_t i = 0; i < port->n_interfaces; i++) {
-        struct ovsrec_interface *iface = port->interfaces[i];
-        if (strcmp(iface->type, "patch")) {
-            continue;
-        }
-        const char *iface_peer = smap_get(&iface->options, "peer");
-        if (iface_peer && !strcmp(iface_peer, peer)) {
-            return true;
+    struct shash *peers = shash_find_data(peers_by_bridge, br->name);
+    if (peers) {
+        return peers;
+    }
+
+    peers = xmalloc(sizeof *peers);
+    shash_init(peers);
+    for (size_t i = 0; i < br->n_ports; i++) {
+        const struct ovsrec_port *port = br->ports[i];
+        for (size_t j = 0; j < port->n_interfaces; j++) {
+            const struct ovsrec_interface *iface = port->interfaces[j];
+            if (strcmp(iface->type, "patch")) {
+                continue;
+            }
+            const char *peer = smap_get(&iface->options, "peer");
+            if (peer && !shash_find(peers, peer)) {
+                shash_add(peers, peer, port);
+            }
         }
     }
-    return false;
+    shash_add(peers_by_bridge, br->name, peers);
+    return peers;
+}
+
+static void
+destroy_patch_peers(struct shash *peers_by_bridge)
+{
+    struct shash_node *node;
+    SHASH_FOR_EACH (node, peers_by_bridge) {
+        struct shash *peers = node->data;
+        shash_destroy(peers);
+        free(peers);
+    }
+    shash_destroy(peers_by_bridge);
 }
 
 /* Creates a patch port in bridge 'src' named 'src_name', whose peer is
@@ -91,14 +118,15 @@ create_patch_port(struct ovsdb_idl_txn *ovs_idl_txn,
                   const char *key, const char *value,
                   const struct ovsrec_bridge *src, const char *src_name,
                   const struct ovsrec_bridge *dst, const char *dst_name,
-                  struct shash *existing_ports)
+                  struct shash *existing_ports,
+                  struct shash *peers_by_bridge)
 {
-    for (size_t i = 0; i < src->n_ports; i++) {
-        if (match_patch_port(src->ports[i], dst_name)) {
-            /* Patch port already exists on 'src'. */
-            shash_find_and_delete(existing_ports, src->ports[i]->name);
-            return PATCH_PORT_EXISTS;
-        }
+    const struct ovsrec_port *port =
+        shash_find_data(get_patch_peers(peers_by_bridge, src), dst_name);
+    if (port) {
+        /* Patch port already exists on 'src'. */
+        shash_find_and_delete(existing_ports, port->name);
+        return PATCH_PORT_EXISTS;
     }
 
     if (!ovs_idl_txn) {
@@ -196,7 +224,8 @@ add_bridge_mappings_by_type(struct ovsdb_idl_txn *ovs_idl_txn,
                             struct shash *bridge_mappings,
                             const char *pb_type, const char *patch_port_id,
                             const struct hmap *local_datapaths,
-                            bool log_missing_bridge)
+                            bool log_missing_bridge,
+                            struct shash *peers_by_bridge)
 {
     struct sbrec_port_binding *target =
         sbrec_port_binding_index_init_row(sbrec_port_binding_by_type);
@@ -254,11 +283,11 @@ add_bridge_mappings_by_type(struct ovsdb_idl_txn *ovs_idl_txn,
         br_int_result = create_patch_port(ovs_idl_txn, patch_port_id,
                                           binding->logical_port,
                                           br_int, name1, br_ln, name2,
-                                          existing_ports);
+                                          existing_ports, peers_by_bridge);
         br_ln_result = create_patch_port(ovs_idl_txn, patch_port_id,
                                          binding->logical_port,
                                          br_ln, name2, br_int, name1,
-                                         existing_ports);
+                                         existing_ports, peers_by_bridge);
 
         synced = synced && (br_int_result == PATCH_PORT_EXISTS) &&
                  (br_ln_result == PATCH_PORT_EXISTS);
@@ -290,12 +319,15 @@ add_bridge_mappings(struct ovsdb_idl_txn *ovs_idl_txn,
 
     add_ovs_bridge_mappings(ovs_table, bridge_table, &bridge_mappings);
 
+    /* Patch ports of each bridge, indexed by peer name. */
+    struct shash peers_by_bridge = SHASH_INITIALIZER(&peers_by_bridge);
+
     bool l2gateway_synced =
         add_bridge_mappings_by_type(ovs_idl_txn, sbrec_port_binding_by_type,
                                     br_int, existing_ports, chassis,
                                     &bridge_mappings, "l2gateway",
                                     "ovn-l2gateway-port", local_datapaths,
-                                    true);
+                                    true, &peers_by_bridge);
 
     /* Since having localnet ports that are not mapped on some chassis is a
      * supported configuration used to implement multisegment switches with
@@ -308,8 +340,9 @@ add_bridge_mappings(struct ovsdb_idl_txn *ovs_idl_txn,
                                     br_int, existing_ports, NULL,
                                     &bridge_mappings, "localnet",
                                     "ovn-localnet-port", local_datapaths,
-                                    false);
+                                    false, &peers_by_bridge);
 
+    destroy_patch_peers(&peers_by_bridge);
     shash_destroy(&bridge_mappings);
     return l2gateway_synced && localnet_synced;
 }
