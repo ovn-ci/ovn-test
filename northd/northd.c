@@ -85,6 +85,12 @@ static bool install_ls_lb_from_router;
 /* Use common zone for SNAT and DNAT if this option is set to "true". */
 static bool use_common_zone = false;
 
+/* True if every chassis in the topology has hardware offload enabled.
+ * When set, northd auto-enables the common NAT zone and skips the
+ * non-offloadable check_pkt_larger action unless the router configuration
+ * is incompatible with a common zone (see lrouter_use_common_zone()). */
+static bool hw_offload = false;
+
 /* If this option is 'true' northd will make use of ct.inv match fields.
  * Otherwise, it will avoid using it.  The default is true. */
 static bool use_ct_inv_match = true;
@@ -13560,10 +13566,38 @@ struct lrouter_nat_lb_flows_ctx {
     const struct shash *meter_groups;
 };
 
+static bool
+lr_has_snat(const struct ovn_datapath *od)
+{
+    for (size_t i = 0; i < od->nbr->n_nat; i++) {
+        const char *type = od->nbr->nat[i]->type;
+        /* Both a plain SNAT rule and a dnat_and_snat (floating IP) rule
+         * perform SNAT, so a load balancer combined with either can require
+         * reversing an SNAT and a DNAT on the same packet. */
+        if (!strcmp(type, "snat") || !strcmp(type, "dnat_and_snat")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static inline bool
 lrouter_use_common_zone(const struct ovn_datapath *od)
 {
-    return !od->is_gw_router && use_common_zone;
+    if (od->is_gw_router) {
+        return false;
+    }
+
+    if (use_common_zone) {
+        return true;
+    }
+
+    /* Hardware offload requires the SNAT and DNAT of a connection to share
+     * a single conntrack zone, but conntrack cannot reverse both an SNAT and
+     * a DNAT on the same packet in one zone.  A router that performs both
+     * (a load balancer plus an SNAT rule) must stay on the separate zones,
+     * so fall back for those routers. */
+    return hw_offload && !(od_has_lb_vip(od) && lr_has_snat(od));
 }
 
 static void
@@ -15173,7 +15207,7 @@ build_gateway_mtu_flow(struct lflow_table *lflows, struct ovn_port *op,
     va_start(extra_actions_args, extra_actions_fmt);
 
     ds_clear(actions);
-    if (gw_mtu > 0) {
+    if (gw_mtu > 0 && !hw_offload) {
         int l2_hdr_size = build_gateway_get_l2_hdr_size(op);
         ds_put_format(actions, REGBIT_PKT_LARGER" = check_pkt_larger(%d); ",
                       gw_mtu + l2_hdr_size);
@@ -15183,7 +15217,7 @@ build_gateway_mtu_flow(struct lflow_table *lflows, struct ovn_port *op,
     ovn_lflow_add(lflows, op->od, stage, prio_low, ds_cstr(match),
                   ds_cstr(actions), lflow_ref, WITH_HINT(hint));
 
-    if (gw_mtu > 0) {
+    if (gw_mtu > 0 && !hw_offload) {
         ds_clear(actions);
         ds_put_format_valist(actions, extra_actions_fmt,
                              extra_actions_args);
@@ -22011,6 +22045,7 @@ ovnnb_db_run(struct northd_input *input_data,
                                               false);
     use_common_zone = smap_get_bool(input_data->nb_options, "use_common_zone",
                                     false);
+    hw_offload = input_data->features->hw_offload;
 
     vxlan_mode = input_data->vxlan_mode;
 

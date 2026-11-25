@@ -393,11 +393,20 @@
 
       <column name="options" key="use_common_zone" type='{"type": "boolean"}'>
         Default value is <code>false</code>. If set to <code>true</code>
-        the SNAT and DNAT happens in common zone, instead of happening in
+        the SNAT and DNAT happens in a common zone, instead of happening in
         separate zones, depending on the configuration. However, this option
         breaks traffic when there is configuration of DGP + LB + SNAT on
-        this LR. The value <code>true</code> should be used only in case
-        of HWOL compatibility with GDP.
+        this LR.
+
+        When this option is not set, ovn-northd enables the common zone
+        automatically for routers that do not combine a load balancer with a
+        NAT rule that performs SNAT (an <code>snat</code> or
+        <code>dnat_and_snat</code> rule), if every chassis in the topology has
+        hardware offload enabled. A chassis advertises hardware offload by
+        setting <code>hw-offload</code> to <code>true</code> in its
+        <ref table="Chassis" db="OVN_Southbound" column="other_config"/>.
+        Routers that perform both SNAT and load-balancer DNAT keep using the
+        separate zones.
       </column>
 
       <column name="options" key="northd-backoff-interval-ms">

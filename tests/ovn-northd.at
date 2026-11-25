@@ -7731,6 +7731,92 @@ AT_CLEANUP
 ])
 
 OVN_FOR_EACH_NORTHD_NO_HV_PARALLELIZATION([
+AT_SETUP([ovn -- hardware offload common zone])
+ovn_start
+
+check ovn-nbctl ls-add sw0
+check ovn-nbctl lr-add lr0
+check ovn-nbctl lrp-add lr0 lr0-sw0 00:00:00:00:ff:01 10.0.0.1/24
+check ovn-nbctl lsp-add-router-port sw0 sw0-lr0 lr0-sw0
+
+check ovn-nbctl ls-add public
+check ovn-nbctl lrp-add lr0 lr0-public 00:00:00:00:ff:02 172.168.0.10/24
+check ovn-nbctl lsp-add-router-port public public-lr0 lr0-public
+
+check ovn-nbctl lr-nat-add lr0 snat 172.168.0.10 10.0.0.0/24
+
+# A chassis with hardware offload enabled, but without the ct-state-save
+# feature so the flows use the plain 'next;' action.
+check ovn-sbctl chassis-add gw1 geneve 127.0.0.1 \
+  -- set chassis gw1 other_config:hw-offload="true"
+
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr0-public gw1
+
+ovn-sbctl dump-flows lr0 > lr0flows
+AT_CAPTURE_FILE([lr0flows])
+
+# Hardware offload forces the common SNAT/DNAT zone.
+AT_CHECK([grep "lr_in_unsnat" lr0flows | ovn_strip_lflows], [0], [dnl
+  table=??(lr_in_unsnat       ), priority=0    , match=(1), action=(next;)
+  table=??(lr_in_unsnat       ), priority=100  , match=(ip && ip4.dst == 172.168.0.10 && inport == "lr0-public" && is_chassis_resident("cr-lr0-public") && flags.loopback == 0), action=(ct_snat_in_czone;)
+  table=??(lr_in_unsnat       ), priority=100  , match=(ip && ip4.dst == 172.168.0.10 && inport == "lr0-public" && is_chassis_resident("cr-lr0-public") && flags.loopback == 1 && flags.use_snat_zone == 1), action=(ct_snat;)
+])
+
+# The gateway MTU check_pkt_larger action is not offloadable, so it is
+# skipped while every chassis is offloading.
+check ovn-nbctl --wait=sb set logical_router_port lr0-public options:gateway_mtu=1500
+ovn-sbctl dump-flows lr0 > lr0flows
+AT_CAPTURE_FILE([lr0flows])
+
+AT_CHECK([grep -E "lr_in_chk_pkt_len" lr0flows | ovn_strip_lflows], [0], [dnl
+  table=??(lr_in_chk_pkt_len  ), priority=0    , match=(1), action=(next;)
+  table=??(lr_in_chk_pkt_len  ), priority=50   , match=(outport == "lr0-public"), action=(next;)
+])
+AT_CHECK([grep -E "check_pkt_larger" lr0flows], [1])
+
+# A chassis that is not offloading disables the common zone for the whole
+# topology (the feature is ANDed across every chassis).
+check ovn-sbctl chassis-add gw2 geneve 127.0.0.2
+check ovn-nbctl --wait=sb sync
+ovn-sbctl dump-flows lr0 > lr0flows
+AT_CAPTURE_FILE([lr0flows])
+
+AT_CHECK([grep "lr_in_unsnat" lr0flows | ovn_strip_lflows], [0], [dnl
+  table=??(lr_in_unsnat       ), priority=0    , match=(1), action=(next;)
+  table=??(lr_in_unsnat       ), priority=100  , match=(ip && ip4.dst == 172.168.0.10 && inport == "lr0-public" && is_chassis_resident("cr-lr0-public")), action=(ct_snat;)
+])
+
+check ovn-sbctl chassis-del gw2
+check ovn-nbctl --wait=sb sync
+
+# A router that also has a load balancer must stay on the separate zones.
+check ovn-nbctl --wait=sb lb-add lb0 172.168.0.100:8082 "10.0.0.50:82"
+check ovn-nbctl --wait=sb lr-lb-add lr0 lb0
+ovn-sbctl dump-flows lr0 > lr0flows
+AT_CAPTURE_FILE([lr0flows])
+
+AT_CHECK([grep "lr_in_unsnat" lr0flows | ovn_strip_lflows], [0], [dnl
+  table=??(lr_in_unsnat       ), priority=0    , match=(1), action=(next;)
+  table=??(lr_in_unsnat       ), priority=100  , match=(ip && ip4.dst == 172.168.0.10 && inport == "lr0-public" && is_chassis_resident("cr-lr0-public")), action=(ct_snat;)
+])
+
+# A floating IP (dnat_and_snat) also performs SNAT, so an LB plus a floating
+# IP must stay on the separate zones too.
+check ovn-nbctl --wait=sb lr-nat-del lr0 snat
+check ovn-nbctl --wait=sb lr-nat-add lr0 dnat_and_snat 172.168.0.20 10.0.0.3
+ovn-sbctl dump-flows lr0 > lr0flows
+AT_CAPTURE_FILE([lr0flows])
+
+AT_CHECK([grep "lr_in_unsnat" lr0flows | ovn_strip_lflows], [0], [dnl
+  table=??(lr_in_unsnat       ), priority=0    , match=(1), action=(next;)
+  table=??(lr_in_unsnat       ), priority=100  , match=(ip && ip4.dst == 172.168.0.20 && inport == "lr0-public" && is_chassis_resident("cr-lr0-public")), action=(ct_snat;)
+])
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD_NO_HV_PARALLELIZATION([
 AT_SETUP([Load Balancer SB duplicates])
 ovn_start
 
