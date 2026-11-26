@@ -71,6 +71,7 @@ function sudo_preserve_env()
 Defaults env_keep += "RUNC_CMD OS_IMAGE CENTRAL_IMAGE CHASSIS_IMAGE RELAY_IMAGE GW_IMAGE ENABLE_SSL"
 # ovn-ci
 Defaults env_keep += "ARCH CC DPDK LIBS OPTS TESTSUITE TEST_RANGE SANITIZERS UNSTABLE BASE_VERSION"
+Defaults env_keep += "LOG_OWNER"
 EOF
     sudo chmod 0440 /etc/sudoers.d/ovn-ci-env
     sudo visudo -cf /etc/sudoers.d/ovn-ci-env

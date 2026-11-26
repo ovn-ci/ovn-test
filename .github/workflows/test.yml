@@ -103,6 +103,7 @@ jobs:
       TEST_RANGE:  ${{ matrix.cfg.test_range }}
       SANITIZERS:  ${{ matrix.cfg.sanitizers }}
       UNSTABLE:    ${{ matrix.cfg.unstable }}
+      LOG_OWNER:   ${{ matrix.cfg.log_owner }}
 
     name: linux ${{ join(matrix.cfg.*, ' ') }}
     runs-on: ubuntu-26.04
@@ -113,6 +114,7 @@ jobs:
         cfg:
         - { compiler: gcc, opts: --disable-ssl }
         - { compiler: clang, opts: --disable-ssl }
+        - { compiler: gcc, testsuite: test, log_owner: openvswitch, test_range: "--keywords=ovn-ctl" }
         - { compiler: gcc, testsuite: dist-test }
         - { compiler: gcc, testsuite: test, test_range: "-300" }
         - { compiler: gcc, testsuite: test, test_range: "301-600" }

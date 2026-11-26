@@ -13,6 +13,7 @@ USE_SPARSE=${USE_SPARSE:-"yes"}
 COMMON_CFLAGS=""
 OVN_CFLAGS=""
 OPTS="$OPTS --enable-Werror"
+OVN_OPTS=""
 JOBS=${JOBS:-"-j4"}
 RECHECK=${RECHECK:-"no"}
 TIMEOUT=${TIMEOUT:-"0"}
@@ -70,8 +71,19 @@ function configure_ovs()
 function configure_ovn()
 {
     configure_ovs $*
-    ./boot.sh && ./configure CFLAGS="${COMMON_CFLAGS} ${OVN_CFLAGS}" $* || \
-    { cat config.log; exit 1; }
+    ./boot.sh && ./configure CFLAGS="${COMMON_CFLAGS} ${OVN_CFLAGS}" \
+        $OVN_OPTS $* || { cat config.log; exit 1; }
+}
+
+function configure_log_owner()
+{
+    local log_user="${LOG_OWNER%%:*}"
+    local log_group="${LOG_OWNER#*:}"
+
+    OVN_OPTS="$OVN_OPTS --enable-tmpfiles-log-ownership"
+    OVN_OPTS="$OVN_OPTS --enable-sysusers-log-ownership"
+    OVN_OPTS="$OVN_OPTS --with-log-user=${log_user}"
+    OVN_OPTS="$OVN_OPTS --with-log-group=${log_group:-$log_user}"
 }
 
 function configure_sanitizers()
@@ -129,7 +141,7 @@ function execute_dist_tests()
     # Now we only need to prepare the Makefile without sparse-wrapped CC.
     configure_ovn
 
-    export DISTCHECK_CONFIGURE_FLAGS="$OPTS"
+    export DISTCHECK_CONFIGURE_FLAGS="$OPTS $OVN_OPTS"
 
     # Just list the tests during distcheck.
     if ! timeout -k 5m -v $TIMEOUT make distcheck \
@@ -239,6 +251,10 @@ function execute_system_tests()
 }
 
 configure_$CC
+
+if [ "$LOG_OWNER" ]; then
+    configure_log_owner
+fi
 
 if [ "$TESTSUITE" ]; then
     case "$TESTSUITE" in
